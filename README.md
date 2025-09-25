@@ -5,6 +5,25 @@ into directory structures that can be consumed by tools such as Apache Spark or 
 
 Also supports converting the output to Parquet.
 
+## Why I Made This Fork
+
+Here's what's better:
+
+* **It Actually Works When Things Go Wrong**  
+  The original would die on one bad line. This version tries fast conversion first, then automatically switches to line-by-line mode to fix broken data.
+
+* **Way Faster on Modern Machines**  
+  Converts multiple tables at once using all your CPU cores. Use `--sequential` if you're on older hardware.
+
+* **Built for Modern Query Engines**  
+  Automatically partitions huge tables by date for tools like DuckDB and Spark. Just add `--enable-partitioning` for blazing fast queries.
+
+* **You Can See What's Happening**  
+  Real-time progress, conversion stats, and a `--resume` flag so you never have to start over from scratch.
+
+* **Works with Bigger Data**  
+  Fixed integer overflow bugs for large datasets and updated to latest Rust/DataFusion.
+
 ## TPC-DS
 
 Install dependencies.
