@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaBuilder};
 use datafusion::common::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::DataFusionError;
@@ -51,9 +51,24 @@ pub async fn convert_to_parquet(
         println!("Converting table {}", table);
         let schema = benchmark.get_schema(table);
 
+        // Append a placeholder field to absorb the trailing delimiter
+        // that TPC data generators add at the end of every line.
+        // TPC-H schemas already include a trailing "ignore" field, so skip those.
+        let has_trailing_ignore = schema
+            .fields
+            .last()
+            .map_or(false, |f| f.name() == "ignore");
+        let csv_schema = if has_trailing_ignore {
+            schema.clone()
+        } else {
+            let mut builder = SchemaBuilder::from(schema.fields);
+            builder.push(Field::new("__trailing_delimiter", DataType::Utf8, true));
+            builder.finish()
+        };
+
         let file_ext = format!(".{}", benchmark.get_table_ext());
         let options = CsvReadOptions::new()
-            .schema(&schema)
+            .schema(&csv_schema)
             .delimiter(b'|')
             .has_header(false)
             .file_extension(&file_ext);
