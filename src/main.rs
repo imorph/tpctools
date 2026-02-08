@@ -10,6 +10,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::Result;
 use std::path::PathBuf;
 
@@ -103,7 +106,7 @@ struct ConvertOpt {
     concurrency: usize,
 
     /// Batch size for reading CSV files
-    #[structopt(long, default_value = "8192")]
+    #[structopt(long, default_value = "65536")]
     batch_size: usize,
 
     /// Compression codec for parquet output (snappy, zstd, none)

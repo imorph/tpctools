@@ -62,7 +62,7 @@ async fn convert_tbl_to_parquet_snappy() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "parquet", "snappy", 8192, false)
+    convert_tbl(&input, output_str, &options, "parquet", "snappy", 8192, false, &[])
         .await
         .unwrap();
 
@@ -90,7 +90,7 @@ async fn convert_tbl_to_csv() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "csv", "none", 8192, false)
+    convert_tbl(&input, output_str, &options, "csv", "none", 8192, false, &[])
         .await
         .unwrap();
 
@@ -109,7 +109,7 @@ async fn convert_tbl_invalid_format() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    let result = convert_tbl(&input, output_str, &options, "json", "none", 8192, false).await;
+    let result = convert_tbl(&input, output_str, &options, "json", "none", 8192, false, &[]).await;
     assert!(result.is_err());
 }
 
@@ -125,7 +125,7 @@ async fn convert_tbl_invalid_compression() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    let result = convert_tbl(&input, output_str, &options, "parquet", "brotli", 8192, false).await;
+    let result = convert_tbl(&input, output_str, &options, "parquet", "brotli", 8192, false, &[]).await;
     assert!(result.is_err());
 }
 
@@ -141,7 +141,7 @@ async fn convert_tbl_compression_none() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "parquet", "none", 8192, false)
+    convert_tbl(&input, output_str, &options, "parquet", "none", 8192, false, &[])
         .await
         .unwrap();
 
@@ -160,7 +160,7 @@ async fn convert_tbl_compression_lz4() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "parquet", "lz4", 8192, false)
+    convert_tbl(&input, output_str, &options, "parquet", "lz4", 8192, false, &[])
         .await
         .unwrap();
 
@@ -341,7 +341,7 @@ async fn convert_tbl_compression_zstd() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "parquet", "zstd", 8192, false)
+    convert_tbl(&input, output_str, &options, "parquet", "zstd", 8192, false, &[])
         .await
         .unwrap();
 

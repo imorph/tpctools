@@ -66,11 +66,11 @@ fn normalize_compression(name: &str) -> datafusion::error::Result<String> {
     }
 }
 
-fn build_parquet_options(compression: &str, dictionary: bool) -> datafusion::error::Result<TableParquetOptions> {
+fn build_parquet_options(compression: &str, batch_size: usize, dictionary: bool) -> datafusion::error::Result<TableParquetOptions> {
     let mut opts = TableParquetOptions::default();
     opts.global.compression = Some(normalize_compression(compression)?);
     opts.global.dictionary_enabled = Some(dictionary);
-    opts.global.write_batch_size = 8192;
+    opts.global.write_batch_size = batch_size;
     Ok(opts)
 }
 
@@ -226,7 +226,7 @@ async fn convert_single_table(
                 table, partition_col
             );
             let path_str = format!("{}", path.display());
-            let target_parts = std::cmp::min(4, concurrency);
+            let target_parts = concurrency;
             let config = SessionConfig::new()
                 .with_batch_size(batch_size)
                 .with_target_partitions(target_parts);
@@ -239,8 +239,9 @@ async fn convert_single_table(
                 "__trailing_delimiter"
             };
             let df = df.drop_columns(&[trailing_col])?;
+            let df = df.sort(vec![col(&partition_col).sort(true, true)])?;
 
-            let table_parquet_options = build_parquet_options(&compression, dictionary)?;
+            let table_parquet_options = build_parquet_options(&compression, batch_size, dictionary)?;
 
             let write_options = DataFrameWriteOptions::new()
                 .with_partition_by(vec![partition_col]);
@@ -292,6 +293,15 @@ async fn convert_single_table(
                 .delimiter(b'|')
                 .has_header(false)
                 .file_extension(&file_ext);
+            let trailing_col = if csv_schema
+                .fields
+                .last()
+                .is_some_and(|f| f.name() == "ignore")
+            {
+                "ignore"
+            } else {
+                "__trailing_delimiter"
+            };
             convert_tbl(
                 &file_path,
                 &dest_file,
@@ -300,6 +310,7 @@ async fn convert_single_table(
                 &compression,
                 batch_size,
                 dictionary,
+                &[trailing_col],
             )
             .await
         });
@@ -363,6 +374,7 @@ pub async fn convert_tbl(
     compression: &str,
     batch_size: usize,
     dictionary: bool,
+    drop_cols: &[&str],
 ) -> datafusion::error::Result<()> {
     debug!(
         "converting '{}' to {}",
@@ -378,6 +390,7 @@ pub async fn convert_tbl(
     // build plan to read the TBL file
     let csv_filename = format!("{}", input_path.display());
     let df = ctx.read_csv(&csv_filename, options.clone()).await?;
+    let df = if drop_cols.is_empty() { df } else { df.drop_columns(drop_cols)? };
 
     match file_format {
         "csv" => {
@@ -385,7 +398,7 @@ pub async fn convert_tbl(
                 .await?;
         }
         "parquet" => {
-            let table_parquet_options = build_parquet_options(compression, dictionary)?;
+            let table_parquet_options = build_parquet_options(compression, batch_size, dictionary)?;
             df.write_parquet(
                 output_filename,
                 DataFrameWriteOptions::new(),
