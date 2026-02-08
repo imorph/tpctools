@@ -10,6 +10,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::Result;
 use std::path::PathBuf;
 
@@ -103,12 +106,16 @@ struct ConvertOpt {
     concurrency: usize,
 
     /// Batch size for reading CSV files
-    #[structopt(long, default_value = "8192")]
+    #[structopt(long, default_value = "65536")]
     batch_size: usize,
 
     /// Compression codec for parquet output (snappy, zstd, none)
     #[structopt(long, default_value = "snappy")]
     compression: String,
+
+    /// Enable dictionary encoding for parquet columns (default: off for faster conversion)
+    #[structopt(long)]
+    dictionary: bool,
 }
 
 #[derive(Debug, StructOpt)]
@@ -131,8 +138,20 @@ enum Command {
     Convert(ConvertOpt),
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let ncpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(ncpus)
+        .max_blocking_threads(ncpus * 2)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let opt = Opt::from_args();
     if std::env::var("RUST_LOG").is_err() {
         let level = if opt.verbose { "debug" } else { "info" };
@@ -176,8 +195,8 @@ async fn main() -> Result<()> {
                 opt.concurrency
             };
             debug!(
-                "convert settings: concurrency={}, batch_size={}, compression={}, hive_partition={}",
-                concurrency, opt.batch_size, opt.compression, opt.hive_partition
+                "convert settings: concurrency={}, batch_size={}, compression={}, hive_partition={}, dictionary={}",
+                concurrency, opt.batch_size, opt.compression, opt.hive_partition, opt.dictionary
             );
             match convert_to_parquet(
                 tpc.as_ref(),
@@ -187,6 +206,7 @@ async fn main() -> Result<()> {
                 concurrency,
                 opt.batch_size,
                 &opt.compression,
+                opt.dictionary,
             )
             .await
             {

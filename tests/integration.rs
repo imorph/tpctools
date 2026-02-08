@@ -4,6 +4,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::prelude::*;
+use datafusion::prelude::SessionConfig;
 use tempfile::TempDir;
 
 use tpctools::tpch::TpcH;
@@ -48,6 +49,13 @@ fn csv_options(schema: &Schema) -> CsvReadOptions<'_> {
         .file_extension(".tbl")
 }
 
+fn test_ctx() -> SessionContext {
+    let config = SessionConfig::new()
+        .with_batch_size(8192)
+        .with_target_partitions(1);
+    SessionContext::new_with_config(config)
+}
+
 // --- convert_tbl tests ---
 
 #[tokio::test]
@@ -62,7 +70,8 @@ async fn convert_tbl_to_parquet_snappy() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "parquet", "snappy", 8192)
+    let ctx = test_ctx();
+    convert_tbl(&ctx, &input, output_str, &options, "parquet", "snappy", 8192, false, &[])
         .await
         .unwrap();
 
@@ -90,7 +99,8 @@ async fn convert_tbl_to_csv() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "csv", "none", 8192)
+    let ctx = test_ctx();
+    convert_tbl(&ctx, &input, output_str, &options, "csv", "none", 8192, false, &[])
         .await
         .unwrap();
 
@@ -109,7 +119,8 @@ async fn convert_tbl_invalid_format() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    let result = convert_tbl(&input, output_str, &options, "json", "none", 8192).await;
+    let ctx = test_ctx();
+    let result = convert_tbl(&ctx, &input, output_str, &options, "json", "none", 8192, false, &[]).await;
     assert!(result.is_err());
 }
 
@@ -125,7 +136,8 @@ async fn convert_tbl_invalid_compression() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    let result = convert_tbl(&input, output_str, &options, "parquet", "brotli", 8192).await;
+    let ctx = test_ctx();
+    let result = convert_tbl(&ctx, &input, output_str, &options, "parquet", "brotli", 8192, false, &[]).await;
     assert!(result.is_err());
 }
 
@@ -141,7 +153,8 @@ async fn convert_tbl_compression_none() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "parquet", "none", 8192)
+    let ctx = test_ctx();
+    convert_tbl(&ctx, &input, output_str, &options, "parquet", "none", 8192, false, &[])
         .await
         .unwrap();
 
@@ -160,7 +173,8 @@ async fn convert_tbl_compression_lz4() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "parquet", "lz4", 8192)
+    let ctx = test_ctx();
+    convert_tbl(&ctx, &input, output_str, &options, "parquet", "lz4", 8192, false, &[])
         .await
         .unwrap();
 
@@ -226,6 +240,7 @@ async fn convert_to_parquet_end_to_end() {
         1,
         8192,
         "snappy",
+        false,
     )
     .await
     .unwrap();
@@ -281,6 +296,7 @@ async fn convert_to_parquet_concurrent() {
         4,
         8192,
         "snappy",
+        false,
     )
     .await
     .unwrap();
@@ -339,7 +355,8 @@ async fn convert_tbl_compression_zstd() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    convert_tbl(&input, output_str, &options, "parquet", "zstd", 8192)
+    let ctx = test_ctx();
+    convert_tbl(&ctx, &input, output_str, &options, "parquet", "zstd", 8192, false, &[])
         .await
         .unwrap();
 
@@ -380,6 +397,7 @@ async fn convert_to_parquet_zstd_compression() {
         2,
         8192,
         "zstd",
+        false,
     )
     .await
     .unwrap();
@@ -477,6 +495,7 @@ async fn convert_to_parquet_hive_partitioned() {
         1,
         8192,
         "snappy",
+        false,
     )
     .await
     .unwrap();
