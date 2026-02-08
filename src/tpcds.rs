@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use log::{debug, error, info, warn};
 use std::fs;
 use std::io::Result;
 use std::path::Path;
@@ -52,11 +53,16 @@ impl Tpc for TpcDs {
             let generator_path = generator_path.to_owned();
             let output_path = output_path.to_owned();
             handles.push(thread::spawn(move || {
+                info!("generating TPC-DS partition {} of {} ...", i, partitions);
+                debug!(
+                    "running ./dsdgen -FORCE -DIR {} -SCALE {} -CHILD {} -PARALLEL {} in {}",
+                    output_path, scale, i, partitions, generator_path
+                );
                 let output = Command::new("./dsdgen")
-                    .current_dir(generator_path.clone())
+                    .current_dir(&generator_path)
                     .arg("-FORCE")
                     .arg("-DIR")
-                    .arg(output_path)
+                    .arg(&output_path)
                     .arg("-SCALE")
                     .arg(format!("{}", scale))
                     .arg("-CHILD")
@@ -66,9 +72,19 @@ impl Tpc for TpcDs {
                     .output();
 
                 match output {
-                    Ok(x) => println!("{:?}", x),
-                    Err(e) => println!(
-                        "Failed to build dsdgen command with path {}: {:?}",
+                    Ok(o) => {
+                        if o.status.success() {
+                            debug!("dsdgen partition {}: exit code 0", i);
+                        } else {
+                            warn!("dsdgen partition {} exited with status {}", i, o.status);
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            if !stderr.is_empty() {
+                                warn!("dsdgen stderr: {}", stderr);
+                            }
+                        }
+                    }
+                    Err(e) => error!(
+                        "failed to spawn dsdgen with path {}: {:?}",
                         generator_path, e
                     ),
                 }
@@ -82,8 +98,8 @@ impl Tpc for TpcDs {
 
         let duration = start.elapsed();
 
-        println!(
-            "Generated TPC-DS data at scale factor {} with {} partitions in: {:?}",
+        info!(
+            "generated TPC-DS data at scale factor {} with {} partitions in {:?}",
             scale, partitions, duration
         );
 
@@ -93,7 +109,7 @@ impl Tpc for TpcDs {
         for table in &tables {
             let output_dir = format!("{}/{}.dat", output_path, table);
             if !Path::new(&output_dir).exists() {
-                println!("Creating directory {}", output_dir);
+                debug!("creating directory {}", output_dir);
                 fs::create_dir(&output_dir)?;
             }
         }

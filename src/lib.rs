@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaBuilder};
+use log::{debug, info};
 use datafusion::common::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::DataFusionError;
@@ -81,6 +82,7 @@ pub async fn convert_to_parquet(
     } else {
         concurrency
     };
+    debug!("effective concurrency: {}", concurrency);
 
     let table_ext = benchmark.get_table_ext().to_string();
     let tables: Vec<(String, Schema, Option<String>)> = benchmark
@@ -92,6 +94,13 @@ pub async fn convert_to_parquet(
             (t.to_string(), schema, partition_col)
         })
         .collect();
+
+    info!(
+        "converting {} tables from '{}' to '{}'",
+        tables.len(),
+        input_path,
+        output_path
+    );
 
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::new();
@@ -147,7 +156,7 @@ async fn convert_single_table(
     table_ext: String,
     semaphore: Arc<Semaphore>,
 ) -> datafusion::error::Result<()> {
-    println!("Converting table {}", table);
+    info!("converting table '{}'", table);
 
     // Append a placeholder field to absorb the trailing delimiter
     // that TPC data generators add at the end of every line.
@@ -193,8 +202,8 @@ async fn convert_single_table(
     if hive_partition {
         if let Some(partition_col) = partition_col {
             let _permit = semaphore.acquire().await.unwrap();
-            println!(
-                "Writing hive-partitioned parquet for {} (partition by {})",
+            info!(
+                "writing hive-partitioned parquet for '{}' (partition by {})",
                 table, partition_col
             );
             let path_str = format!("{}", path.display());
@@ -230,7 +239,7 @@ async fn convert_single_table(
         }
     }
 
-    println!("Creating directory: {}", output_dir.display());
+    debug!("creating directory: {}", output_dir.display());
     fs::create_dir(output_dir)?;
 
     let x = PathBuf::from(path);
@@ -243,6 +252,8 @@ async fn convert_single_table(
         }
     }
 
+    debug!("found {} partition files for table '{}'", file_vec.len(), table);
+
     let mut handles = Vec::new();
     for (part, file) in file_vec.iter().enumerate() {
         let dest_file = format!("{}/part-{}.parquet", output_dir.display(), part);
@@ -254,7 +265,7 @@ async fn convert_single_table(
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            println!("Writing {}", dest_file);
+            debug!("writing {}", dest_file);
             let options = CsvReadOptions::new()
                 .schema(&csv_schema)
                 .delimiter(b'|')
@@ -289,15 +300,15 @@ pub(crate) fn move_or_copy(
     dest_path: &Path,
 ) -> std::result::Result<(), std::io::Error> {
     if is_same_device(source_path, dest_path)? {
-        println!(
-            "Moving {} to {}",
+        debug!(
+            "moving {} to {}",
             source_path.display(),
             dest_path.display()
         );
         fs::rename(source_path, dest_path)
     } else {
-        println!(
-            "Copying {} to {}",
+        debug!(
+            "copying {} to {}",
             source_path.display(),
             dest_path.display()
         );
@@ -330,8 +341,8 @@ pub async fn convert_tbl(
     compression: &str,
     batch_size: usize,
 ) -> datafusion::error::Result<()> {
-    println!(
-        "Converting '{}' to {}",
+    debug!(
+        "converting '{}' to {}",
         input_path.display(),
         output_filename
     );
@@ -367,7 +378,11 @@ pub async fn convert_tbl(
             )))
         }
     }
-    println!("Conversion completed in {} ms", start.elapsed().as_millis());
+    info!(
+        "conversion of '{}' completed in {} ms",
+        input_path.display(),
+        start.elapsed().as_millis()
+    );
 
     Ok(())
 }

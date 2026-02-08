@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use log::{debug, info, warn};
 
 use crate::{move_or_copy, Tpc};
 
@@ -52,23 +53,36 @@ impl Tpc for TpcH {
         if partitions == 1 {
             let generator_path = generator_path.to_owned();
             handles.push(thread::spawn(move || {
-                println!("Generating partition 1 of 1 ...");
+                info!("generating partition 1 of 1 ...");
+                debug!("running ./dbgen -f -s {} in {}", scale, generator_path);
                 let output = Command::new("./dbgen")
-                    .current_dir(generator_path)
+                    .current_dir(&generator_path)
                     .arg("-f")
                     .arg("-s")
                     .arg(format!("{}", scale))
                     .output()
                     .expect("failed to generate data");
-                println!("{:?}", output);
+                if output.status.success() {
+                    debug!("dbgen partition 1: exit code 0");
+                } else {
+                    warn!("dbgen partition 1 exited with status {}", output.status);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stderr.is_empty() {
+                        warn!("dbgen stderr: {}", stderr);
+                    }
+                }
             }));
         } else {
             for i in 1..=partitions {
                 let generator_path = generator_path.to_owned();
                 handles.push(thread::spawn(move || {
-                    println!("Generating partition {} of {} ...", i, partitions);
+                    info!("generating partition {} of {} ...", i, partitions);
+                    debug!(
+                        "running ./dbgen -f -s {} -C {} -S {} in {}",
+                        scale, partitions, i, generator_path
+                    );
                     let output = Command::new("./dbgen")
-                        .current_dir(generator_path)
+                        .current_dir(&generator_path)
                         .arg("-f")
                         .arg("-s")
                         .arg(format!("{}", scale))
@@ -78,7 +92,15 @@ impl Tpc for TpcH {
                         .arg(format!("{}", i))
                         .output()
                         .expect("failed to generate data");
-                    println!("{:?}", output);
+                    if output.status.success() {
+                        debug!("dbgen partition {}: exit code 0", i);
+                    } else {
+                        warn!("dbgen partition {} exited with status {}", i, output.status);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        if !stderr.is_empty() {
+                            warn!("dbgen stderr: {}", stderr);
+                        }
+                    }
                 }));
             }
         }
@@ -90,8 +112,8 @@ impl Tpc for TpcH {
 
         let duration = start.elapsed();
 
-        println!(
-            "Generated TPC-H data at scale factor {} with {} partitions in: {:?}",
+        info!(
+            "generated TPC-H data at scale factor {} with {} partitions in {:?}",
             scale, partitions, duration
         );
 
@@ -100,7 +122,7 @@ impl Tpc for TpcH {
         ];
 
         if !Path::new(&output_path).exists() {
-            println!("Creating directory {}", output_path);
+            debug!("creating directory {}", output_path);
             fs::create_dir(output_path)?;
         }
 
@@ -108,7 +130,7 @@ impl Tpc for TpcH {
         for table in &tables {
             let output_dir = format!("{}/{}.tbl", output_path, table);
             if !Path::new(&output_dir).exists() {
-                println!("Creating directory {}", output_dir);
+                debug!("creating directory {}", output_dir);
                 fs::create_dir(&output_dir)?;
             }
         }

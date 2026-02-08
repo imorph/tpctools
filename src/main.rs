@@ -13,6 +13,7 @@
 use std::io::Result;
 use std::path::PathBuf;
 
+use log::{debug, error, info, warn};
 use structopt::StructOpt;
 
 use tpctools::tpcds::TpcDs;
@@ -35,7 +36,7 @@ fn raise_fd_limit() {
             rlim_max: 0,
         };
         if getrlimit(RLIMIT_NOFILE, &mut rlim) != 0 {
-            eprintln!("warning: failed to query file descriptor limit");
+            warn!("failed to query file descriptor limit");
             return;
         }
         if rlim.rlim_cur >= rlim.rlim_max {
@@ -44,9 +45,9 @@ fn raise_fd_limit() {
         let old = rlim.rlim_cur;
         rlim.rlim_cur = rlim.rlim_max;
         if setrlimit(RLIMIT_NOFILE, &rlim) == 0 {
-            eprintln!("info: raised file descriptor limit from {} to {}", old, rlim.rlim_max);
+            info!("raised file descriptor limit from {} to {}", old, rlim.rlim_max);
         } else {
-            eprintln!("warning: failed to raise file descriptor limit");
+            warn!("failed to raise file descriptor limit");
         }
     }
 }
@@ -115,28 +116,47 @@ struct ConvertOpt {
     name = "tpctools",
     about = "Tools for generating and converting TPC data sets."
 )]
-enum Opt {
+struct Opt {
+    /// Enable verbose (debug-level) logging
+    #[structopt(short, long, global = true)]
+    verbose: bool,
+
+    #[structopt(subcommand)]
+    cmd: Command,
+}
+
+#[derive(Debug, StructOpt)]
+enum Command {
     Generate(GenerateOpt),
     Convert(ConvertOpt),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let opt = Opt::from_args();
+    if std::env::var("RUST_LOG").is_err() {
+        let level = if opt.verbose { "debug" } else { "info" };
+        std::env::set_var("RUST_LOG", level);
+    }
+    env_logger::init();
+
     raise_fd_limit();
-    match Opt::from_args() {
-        Opt::Generate(opt) => {
+    match opt.cmd {
+        Command::Generate(opt) => {
             let scale = opt.scale;
             let partitions = opt.partitions;
 
             if !opt.generator_path.exists() {
-                panic!(
+                error!(
                     "generator path does not exist: {}",
                     opt.generator_path.display()
-                )
+                );
+                std::process::exit(1);
             }
 
             if !opt.output.exists() {
-                panic!("output path does not exist: {}", opt.output.display())
+                error!("output path does not exist: {}", opt.output.display());
+                std::process::exit(1);
             }
 
             let generator_path = format!("{}", opt.generator_path.display());
@@ -146,7 +166,7 @@ async fn main() -> Result<()> {
 
             tpc.generate(scale, partitions, &generator_path, &output_path_str)?;
         }
-        Opt::Convert(opt) => {
+        Command::Convert(opt) => {
             let tpc = create_benchmark(&opt.benchmark);
             let concurrency = if opt.concurrency == 0 {
                 std::thread::available_parallelism()
@@ -155,6 +175,10 @@ async fn main() -> Result<()> {
             } else {
                 opt.concurrency
             };
+            debug!(
+                "convert settings: concurrency={}, batch_size={}, compression={}, hive_partition={}",
+                concurrency, opt.batch_size, opt.compression, opt.hive_partition
+            );
             match convert_to_parquet(
                 tpc.as_ref(),
                 opt.input_path.as_path().to_str().unwrap(),
@@ -167,7 +191,7 @@ async fn main() -> Result<()> {
             .await
             {
                 Ok(_) => {}
-                Err(e) => println!("{:?}", e),
+                Err(e) => error!("conversion failed: {:?}", e),
             }
         }
     }
