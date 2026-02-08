@@ -71,7 +71,7 @@ pub async fn convert_to_parquet(
             panic!("output dir already exists: {}", output_dir.display());
         }
         println!("Creating directory: {}", output_dir.display());
-        fs::create_dir(&output_dir)?;
+        fs::create_dir(output_dir)?;
 
         let x = PathBuf::from(path);
         let mut file_vec = vec![];
@@ -83,13 +83,11 @@ pub async fn convert_to_parquet(
             }
         }
 
-        let mut part = 0;
-        for file in &file_vec {
+        for (part, file) in file_vec.iter().enumerate() {
             let dest_file = format!("{}/part-{}.parquet", output_dir.display(), part);
             println!("Writing {}", dest_file);
             let options = options.clone();
             convert_tbl(&file.path(), &dest_file, &options, "parquet", "snappy", 8192).await?;
-            part += 1;
         }
     }
 
@@ -100,21 +98,21 @@ pub(crate) fn move_or_copy(
     source_path: &Path,
     dest_path: &Path,
 ) -> std::result::Result<(), std::io::Error> {
-    if is_same_device(&source_path, &dest_path)? {
+    if is_same_device(source_path, dest_path)? {
         println!(
             "Moving {} to {}",
             source_path.display(),
             dest_path.display()
         );
-        fs::rename(&source_path, &dest_path)
+        fs::rename(source_path, dest_path)
     } else {
         println!(
             "Copying {} to {}",
             source_path.display(),
             dest_path.display()
         );
-        fs::copy(&source_path, &dest_path)?;
-        fs::remove_file(&source_path)
+        fs::copy(source_path, dest_path)?;
+        fs::remove_file(source_path)
     }
 }
 
@@ -159,7 +157,7 @@ pub async fn convert_tbl(
 
     match file_format {
         "csv" => {
-            df.write_csv(&output_filename, DataFrameWriteOptions::new(), None)
+            df.write_csv(output_filename, DataFrameWriteOptions::new(), None)
                 .await?;
         }
         "parquet" => {
@@ -178,7 +176,7 @@ pub async fn convert_tbl(
             let mut table_parquet_options = TableParquetOptions::default();
             table_parquet_options.global.compression = Some(compression_str.to_string());
             df.write_parquet(
-                &output_filename,
+                output_filename,
                 DataFrameWriteOptions::new(),
                 Some(table_parquet_options),
             )

@@ -23,6 +23,12 @@ use crate::{move_or_copy, Tpc};
 
 pub struct TpcDs {}
 
+impl Default for TpcDs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TpcDs {
     pub fn new() -> Self {
         Self {}
@@ -45,8 +51,6 @@ impl Tpc for TpcDs {
         for i in 1..=partitions {
             let generator_path = generator_path.to_owned();
             let output_path = output_path.to_owned();
-            let scale = scale;
-            let partitions = partitions;
             handles.push(thread::spawn(move || {
                 let output = Command::new("./dsdgen")
                     .current_dir(generator_path.clone())
@@ -95,7 +99,7 @@ impl Tpc for TpcDs {
                 let filename = format!("{}/{}_{}_{}.dat", output_path, table, i, partitions);
                 let filename2 = format!("{}/part-{}.dat", output_dir, i);
                 if Path::new(&filename).exists() {
-                    move_or_copy(&Path::new(&filename), &Path::new(&filename2))?;
+                    move_or_copy(Path::new(&filename), Path::new(&filename2))?;
                 }
             }
         }
