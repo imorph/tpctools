@@ -2679,6 +2679,7 @@ dependencies = [
  "async-trait",
  "datafusion",
  "futures",
+ "libc",
  "structopt",
  "tempfile",
  "tokio",

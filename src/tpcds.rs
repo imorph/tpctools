@@ -642,6 +642,19 @@ impl Tpc for TpcDs {
     fn get_table_ext(&self) -> &str {
         "dat"
     }
+
+    fn get_partition_col(&self, table: &str) -> Option<&str> {
+        match table {
+            "store_sales" => Some("ss_sold_date_sk"),
+            "catalog_sales" => Some("cs_sold_date_sk"),
+            "web_sales" => Some("ws_sold_date_sk"),
+            "store_returns" => Some("sr_returned_date_sk"),
+            "catalog_returns" => Some("cr_returned_date_sk"),
+            "web_returns" => Some("wr_returned_date_sk"),
+            "inventory" => Some("inv_date_sk"),
+            _ => None,
+        }
+    }
 }
 
 fn make_decimal_type(p: u8, s: i8) -> DataType {
@@ -854,6 +867,32 @@ mod tests {
                 first.name(),
                 prefix
             );
+        }
+    }
+
+    #[test]
+    fn partition_col_fact_tables() {
+        let t = tpcds();
+        assert_eq!(t.get_partition_col("store_sales"), Some("ss_sold_date_sk"));
+        assert_eq!(t.get_partition_col("catalog_sales"), Some("cs_sold_date_sk"));
+        assert_eq!(t.get_partition_col("web_sales"), Some("ws_sold_date_sk"));
+        assert_eq!(t.get_partition_col("store_returns"), Some("sr_returned_date_sk"));
+        assert_eq!(t.get_partition_col("catalog_returns"), Some("cr_returned_date_sk"));
+        assert_eq!(t.get_partition_col("web_returns"), Some("wr_returned_date_sk"));
+        assert_eq!(t.get_partition_col("inventory"), Some("inv_date_sk"));
+    }
+
+    #[test]
+    fn partition_col_dimension_tables_return_none() {
+        let t = tpcds();
+        let dimension_tables = [
+            "call_center", "catalog_page", "customer", "customer_address",
+            "customer_demographics", "date_dim", "income_band",
+            "household_demographics", "store", "ship_mode", "reason",
+            "promotion", "item", "web_page", "warehouse", "time_dim", "web_site",
+        ];
+        for table in &dimension_tables {
+            assert_eq!(t.get_partition_col(table), None, "{} should not be partitioned", table);
         }
     }
 

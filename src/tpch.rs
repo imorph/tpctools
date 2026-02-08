@@ -243,6 +243,14 @@ impl Tpc for TpcH {
     fn get_table_ext(&self) -> &str {
         "tbl"
     }
+
+    fn get_partition_col(&self, table: &str) -> Option<&str> {
+        match table {
+            "lineitem" => Some("l_shipdate"),
+            "orders" => Some("o_orderdate"),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -374,6 +382,21 @@ mod tests {
                 first.name(),
                 prefix
             );
+        }
+    }
+
+    #[test]
+    fn partition_col_fact_tables() {
+        let t = tpch();
+        assert_eq!(t.get_partition_col("lineitem"), Some("l_shipdate"));
+        assert_eq!(t.get_partition_col("orders"), Some("o_orderdate"));
+    }
+
+    #[test]
+    fn partition_col_dimension_tables_return_none() {
+        let t = tpch();
+        for table in &["nation", "region", "part", "supplier", "partsupp", "customer"] {
+            assert_eq!(t.get_partition_col(table), None, "{} should not be partitioned", table);
         }
     }
 

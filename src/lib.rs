@@ -40,12 +40,18 @@ pub trait Tpc {
     fn get_table_ext(&self) -> &str;
 
     fn get_schema(&self, table: &str) -> Schema;
+
+    fn get_partition_col(&self, table: &str) -> Option<&str> {
+        let _ = table;
+        None
+    }
 }
 
 pub async fn convert_to_parquet(
     benchmark: &dyn Tpc,
     input_path: &str,
     output_path: &str,
+    hive_partition: bool,
 ) -> datafusion::error::Result<()> {
     for table in benchmark.get_table_names() {
         println!("Converting table {}", table);
@@ -85,6 +91,43 @@ pub async fn convert_to_parquet(
         if output_dir.exists() {
             panic!("output dir already exists: {}", output_dir.display());
         }
+
+        if hive_partition {
+            if let Some(partition_col) = benchmark.get_partition_col(table) {
+                println!(
+                    "Writing hive-partitioned parquet for {} (partition by {})",
+                    table, partition_col
+                );
+                let path_str = format!("{}", path.display());
+                let config = SessionConfig::new().with_batch_size(8192);
+                let ctx = SessionContext::new_with_config(config);
+                let df = ctx.read_csv(&path_str, options.clone()).await?;
+
+                let trailing_col = if has_trailing_ignore {
+                    "ignore"
+                } else {
+                    "__trailing_delimiter"
+                };
+                let df = df.drop_columns(&[trailing_col])?;
+
+                let mut table_parquet_options = TableParquetOptions::default();
+                table_parquet_options.global.compression =
+                    Some("snappy".to_string());
+
+                let write_options = DataFrameWriteOptions::new()
+                    .with_partition_by(vec![partition_col.to_string()]);
+
+                df.write_parquet(
+                    &output_dir_name,
+                    write_options,
+                    Some(table_parquet_options),
+                )
+                .await?;
+
+                continue;
+            }
+        }
+
         println!("Creating directory: {}", output_dir.display());
         fs::create_dir(output_dir)?;
 

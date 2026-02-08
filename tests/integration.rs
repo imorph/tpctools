@@ -222,6 +222,7 @@ async fn convert_to_parquet_end_to_end() {
         &tpc,
         input_dir.to_str().unwrap(),
         output_dir.to_str().unwrap(),
+        false,
     )
     .await
     .unwrap();
@@ -249,4 +250,123 @@ async fn convert_to_parquet_end_to_end() {
         .unwrap();
     let count = df.count().await.unwrap();
     assert_eq!(count, 5);
+}
+
+// --- Hive partitioned convert_to_parquet tests ---
+
+/// Create a small pipe-delimited orders fixture (4 rows, 2 distinct dates).
+fn create_orders_tbl(path: &Path) {
+    let data = "\
+1|370|O|172799.49|1996-01-02|5-LOW|Clerk#000000951|0|nstructions sleep|
+2|781|F|38426.09|1993-06-01|1-URGENT|Clerk#000000880|0|foxes pending|
+3|1234|F|205654.30|1993-06-01|5-LOW|Clerk#000000955|0|sly final accounts|
+4|1369|O|56000.00|1996-01-02|5-LOW|Clerk#000000124|0|deposits blithely|
+";
+    fs::write(path, data).unwrap();
+}
+
+fn orders_schema() -> Schema {
+    TpcH::new().get_schema("orders")
+}
+
+struct HiveTestTpc;
+
+#[async_trait]
+impl Tpc for HiveTestTpc {
+    fn generate(
+        &self,
+        _scale: usize,
+        _partitions: usize,
+        _input_path: &str,
+        _output_path: &str,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn get_table_names(&self) -> Vec<&str> {
+        vec!["orders"]
+    }
+
+    fn get_table_ext(&self) -> &str {
+        "tbl"
+    }
+
+    fn get_schema(&self, table: &str) -> Schema {
+        match table {
+            "orders" => orders_schema(),
+            _ => panic!("unknown table: {}", table),
+        }
+    }
+
+    fn get_partition_col(&self, table: &str) -> Option<&str> {
+        match table {
+            "orders" => Some("o_orderdate"),
+            _ => None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn convert_to_parquet_hive_partitioned() {
+    let dir = TempDir::new().unwrap();
+    let input_dir = dir.path().join("input");
+    let output_dir = dir.path().join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+
+    // Create directory structure: input/orders.tbl/part-0.tbl
+    let orders_dir = input_dir.join("orders.tbl");
+    fs::create_dir(&orders_dir).unwrap();
+    create_orders_tbl(&orders_dir.join("part-0.tbl"));
+
+    let tpc = HiveTestTpc;
+    convert_to_parquet(
+        &tpc,
+        input_dir.to_str().unwrap(),
+        output_dir.to_str().unwrap(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Verify output directory exists
+    let orders_parquet = output_dir.join("orders.parquet");
+    assert!(orders_parquet.exists(), "orders.parquet dir should exist");
+
+    // Verify hive partition directories exist
+    let entries: Vec<_> = fs::read_dir(&orders_parquet)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    assert!(
+        entries.len() >= 2,
+        "expected at least 2 partition directories, found {}",
+        entries.len()
+    );
+
+    // Check that directory names look like hive partitions
+    let dir_names: Vec<String> = entries
+        .iter()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    for name in &dir_names {
+        assert!(
+            name.starts_with("o_orderdate="),
+            "expected hive partition dir, got: {}",
+            name
+        );
+    }
+
+    // Read back and verify total row count
+    let ctx = SessionContext::new();
+    let df = ctx
+        .read_parquet(
+            orders_parquet.to_str().unwrap(),
+            ParquetReadOptions::default(),
+        )
+        .await
+        .unwrap();
+    let count = df.count().await.unwrap();
+    assert_eq!(count, 4);
 }
