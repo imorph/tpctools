@@ -17,9 +17,9 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::Schema;
+use datafusion::common::config::TableParquetOptions;
+use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::DataFusionError;
-use datafusion::parquet::basic::Compression;
-use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::prelude::*;
 
 pub mod tpcds;
@@ -174,23 +174,23 @@ pub async fn convert_tbl(
     let start = Instant::now();
 
     let config = SessionConfig::new().with_batch_size(batch_size);
-    let ctx = SessionContext::with_config(config);
+    let ctx = SessionContext::new_with_config(config);
 
     // build plan to read the TBL file
     let csv_filename = format!("{}", input_path.display());
     let df = ctx.read_csv(&csv_filename, options.clone()).await?;
 
     match file_format {
-        "csv" => df.write_csv(&output_filename).await?,
+        "csv" => {
+            df.write_csv(&output_filename, DataFrameWriteOptions::new(), None)
+                .await?;
+        }
         "parquet" => {
-            let compression = match compression {
-                "none" => Compression::UNCOMPRESSED,
-                "snappy" => Compression::SNAPPY,
-                // "brotli" => Compression::BROTLI,
-                // "gzip" => Compression::GZIP,
-                "lz4" => Compression::LZ4,
-                "lz0" => Compression::LZO,
-                // "zstd" => Compression::ZSTD,
+            let compression_str = match compression {
+                "none" => "uncompressed",
+                "snappy" => "snappy",
+                "lz4" => "lz4",
+                "lz0" => "lzo",
                 other => {
                     return Err(DataFusionError::NotImplemented(format!(
                         "Invalid compression format: {}",
@@ -198,11 +198,14 @@ pub async fn convert_tbl(
                     )))
                 }
             };
-            let props = WriterProperties::builder()
-                .set_compression(compression)
-                .build();
-
-            df.write_parquet(&output_filename, Some(props)).await?
+            let mut table_parquet_options = TableParquetOptions::default();
+            table_parquet_options.global.compression = Some(compression_str.to_string());
+            df.write_parquet(
+                &output_filename,
+                DataFrameWriteOptions::new(),
+                Some(table_parquet_options),
+            )
+            .await?;
         }
         other => {
             return Err(DataFusionError::NotImplemented(format!(

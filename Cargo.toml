@@ -6,11 +6,11 @@ description = "Utilities for generating and converting TPC-H and TPC-DS data set
 homepage = "https://github.com/andygrove/tpctools/"
 repository = "https://github.com/andygrove/tpctools/"
 license = "Apache-2.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 structopt = { version = "0.3", default-features = false }
 async-trait = "0.1.50"
-datafusion = "23.0.0"
+datafusion = "52.1.0"
 futures = "0.3.24"
 tokio = { version = "1.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
