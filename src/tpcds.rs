@@ -89,20 +89,41 @@ impl Tpc for TpcDs {
 
         let tables = self.get_table_names();
 
+        // Create per-table directories sequentially
         for table in &tables {
             let output_dir = format!("{}/{}.dat", output_path, table);
             if !Path::new(&output_dir).exists() {
                 println!("Creating directory {}", output_dir);
                 fs::create_dir(&output_dir)?;
             }
+        }
+
+        // Collect all (source, destination) pairs for file moves
+        let mut file_pairs = Vec::new();
+        for table in &tables {
+            let output_dir = format!("{}/{}.dat", output_path, table);
             for i in 1..=partitions {
-                let filename = format!("{}/{}_{}_{}.dat", output_path, table, i, partitions);
-                let filename2 = format!("{}/part-{}.dat", output_dir, i);
-                if Path::new(&filename).exists() {
-                    move_or_copy(Path::new(&filename), Path::new(&filename2))?;
+                let src = format!("{}/{}_{}_{}.dat", output_path, table, i, partitions);
+                let dst = format!("{}/part-{}.dat", output_dir, i);
+                if Path::new(&src).exists() {
+                    file_pairs.push((src, dst));
                 }
             }
         }
+
+        // Move/copy files in parallel
+        thread::scope(|s| {
+            let handles: Vec<_> = file_pairs
+                .iter()
+                .map(|(src, dst)| {
+                    s.spawn(|| move_or_copy(Path::new(src), Path::new(dst)))
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap()?;
+            }
+            Ok::<(), std::io::Error>(())
+        })?;
 
         Ok(())
     }

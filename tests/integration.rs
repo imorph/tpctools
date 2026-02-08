@@ -125,7 +125,7 @@ async fn convert_tbl_invalid_compression() {
     let schema = nation_schema();
     let options = csv_options(&schema);
 
-    let result = convert_tbl(&input, output_str, &options, "parquet", "zstd", 8192).await;
+    let result = convert_tbl(&input, output_str, &options, "parquet", "brotli", 8192).await;
     assert!(result.is_err());
 }
 
@@ -223,6 +223,9 @@ async fn convert_to_parquet_end_to_end() {
         input_dir.to_str().unwrap(),
         output_dir.to_str().unwrap(),
         false,
+        1,
+        8192,
+        "snappy",
     )
     .await
     .unwrap();
@@ -240,6 +243,152 @@ async fn convert_to_parquet_end_to_end() {
     assert!(region_part0.is_file(), "region.parquet/part-0.parquet should be a file");
 
     // Read back nation parquet and verify row count
+    let ctx = SessionContext::new();
+    let df = ctx
+        .read_parquet(
+            nation_parquet.to_str().unwrap(),
+            ParquetReadOptions::default(),
+        )
+        .await
+        .unwrap();
+    let count = df.count().await.unwrap();
+    assert_eq!(count, 5);
+}
+
+#[tokio::test]
+async fn convert_to_parquet_concurrent() {
+    let dir = TempDir::new().unwrap();
+    let input_dir = dir.path().join("input");
+    let output_dir = dir.path().join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+
+    // Create directory structure: input/nation.tbl/part-0.tbl
+    let nation_dir = input_dir.join("nation.tbl");
+    fs::create_dir(&nation_dir).unwrap();
+    create_nation_tbl(&nation_dir.join("part-0.tbl"));
+
+    let region_dir = input_dir.join("region.tbl");
+    fs::create_dir(&region_dir).unwrap();
+    create_region_tbl(&region_dir.join("part-0.tbl"));
+
+    let tpc = TestTpc;
+    convert_to_parquet(
+        &tpc,
+        input_dir.to_str().unwrap(),
+        output_dir.to_str().unwrap(),
+        false,
+        4,
+        8192,
+        "snappy",
+    )
+    .await
+    .unwrap();
+
+    // Verify output directories exist
+    let nation_parquet = output_dir.join("nation.parquet");
+    let region_parquet = output_dir.join("region.parquet");
+    assert!(nation_parquet.exists(), "nation.parquet dir should exist");
+    assert!(region_parquet.exists(), "region.parquet dir should exist");
+
+    // Verify parquet part files exist inside
+    let nation_part0 = nation_parquet.join("part-0.parquet");
+    assert!(
+        nation_part0.is_file(),
+        "nation.parquet/part-0.parquet should be a file"
+    );
+    let region_part0 = region_parquet.join("part-0.parquet");
+    assert!(
+        region_part0.is_file(),
+        "region.parquet/part-0.parquet should be a file"
+    );
+
+    // Read back nation parquet and verify row count
+    let ctx = SessionContext::new();
+    let df = ctx
+        .read_parquet(
+            nation_parquet.to_str().unwrap(),
+            ParquetReadOptions::default(),
+        )
+        .await
+        .unwrap();
+    let count = df.count().await.unwrap();
+    assert_eq!(count, 5);
+
+    // Read back region parquet and verify row count
+    let df = ctx
+        .read_parquet(
+            region_parquet.to_str().unwrap(),
+            ParquetReadOptions::default(),
+        )
+        .await
+        .unwrap();
+    let count = df.count().await.unwrap();
+    assert_eq!(count, 3);
+}
+
+#[tokio::test]
+async fn convert_tbl_compression_zstd() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("nation.tbl");
+    create_nation_tbl(&input);
+
+    let output = dir.path().join("output_zstd.parquet");
+    let output_str = output.to_str().unwrap();
+
+    let schema = nation_schema();
+    let options = csv_options(&schema);
+
+    convert_tbl(&input, output_str, &options, "parquet", "zstd", 8192)
+        .await
+        .unwrap();
+
+    assert!(output.exists());
+
+    // Read back and verify row count
+    let ctx = SessionContext::new();
+    let df = ctx
+        .read_parquet(output_str, ParquetReadOptions::default())
+        .await
+        .unwrap();
+    let count = df.count().await.unwrap();
+    assert_eq!(count, 5);
+}
+
+#[tokio::test]
+async fn convert_to_parquet_zstd_compression() {
+    let dir = TempDir::new().unwrap();
+    let input_dir = dir.path().join("input");
+    let output_dir = dir.path().join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+
+    let nation_dir = input_dir.join("nation.tbl");
+    fs::create_dir(&nation_dir).unwrap();
+    create_nation_tbl(&nation_dir.join("part-0.tbl"));
+
+    let region_dir = input_dir.join("region.tbl");
+    fs::create_dir(&region_dir).unwrap();
+    create_region_tbl(&region_dir.join("part-0.tbl"));
+
+    let tpc = TestTpc;
+    convert_to_parquet(
+        &tpc,
+        input_dir.to_str().unwrap(),
+        output_dir.to_str().unwrap(),
+        false,
+        2,
+        8192,
+        "zstd",
+    )
+    .await
+    .unwrap();
+
+    // Verify output directories exist
+    let nation_parquet = output_dir.join("nation.parquet");
+    assert!(nation_parquet.exists(), "nation.parquet dir should exist");
+
+    // Read back and verify row count
     let ctx = SessionContext::new();
     let df = ctx
         .read_parquet(
@@ -325,6 +474,9 @@ async fn convert_to_parquet_hive_partitioned() {
         input_dir.to_str().unwrap(),
         output_dir.to_str().unwrap(),
         true,
+        1,
+        8192,
+        "snappy",
     )
     .await
     .unwrap();

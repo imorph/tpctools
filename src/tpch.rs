@@ -104,29 +104,49 @@ impl Tpc for TpcH {
             fs::create_dir(output_path)?;
         }
 
+        // Create per-table directories sequentially
         for table in &tables {
             let output_dir = format!("{}/{}.tbl", output_path, table);
             if !Path::new(&output_dir).exists() {
                 println!("Creating directory {}", output_dir);
                 fs::create_dir(&output_dir)?;
             }
+        }
 
+        // Collect all (source, destination) pairs for file moves
+        let mut file_pairs = Vec::new();
+        for table in &tables {
+            let output_dir = format!("{}/{}.tbl", output_path, table);
             if partitions == 1 {
-                let filename = format!("{}/{}.tbl", generator_path, table);
-                let filename2 = format!("{}/part-0.tbl", output_dir);
-                if Path::new(&filename).exists() {
-                    move_or_copy(Path::new(&filename), Path::new(&filename2))?;
+                let src = format!("{}/{}.tbl", generator_path, table);
+                let dst = format!("{}/part-0.tbl", output_dir);
+                if Path::new(&src).exists() {
+                    file_pairs.push((src, dst));
                 }
             } else {
                 for i in 1..=partitions {
-                    let filename = format!("{}/{}.tbl.{}", generator_path, table, i);
-                    let filename2 = format!("{}/part-{}.tbl", output_dir, i);
-                    if Path::new(&filename).exists() {
-                        move_or_copy(Path::new(&filename), Path::new(&filename2))?;
+                    let src = format!("{}/{}.tbl.{}", generator_path, table, i);
+                    let dst = format!("{}/part-{}.tbl", output_dir, i);
+                    if Path::new(&src).exists() {
+                        file_pairs.push((src, dst));
                     }
                 }
             }
         }
+
+        // Move/copy files in parallel
+        thread::scope(|s| {
+            let handles: Vec<_> = file_pairs
+                .iter()
+                .map(|(src, dst)| {
+                    s.spawn(|| move_or_copy(Path::new(src), Path::new(dst)))
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap()?;
+            }
+            Ok::<(), std::io::Error>(())
+        })?;
 
         Ok(())
     }

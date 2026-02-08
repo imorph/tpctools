@@ -286,7 +286,7 @@ async fn tpch_generate_and_convert_to_parquet() {
     let parquet_dir = TempDir::new().expect("failed to create parquet output dir");
     let parquet_path = parquet_dir.path().to_str().unwrap();
 
-    convert_to_parquet(&tpch, &setup.output_path, parquet_path, false)
+    convert_to_parquet(&tpch, &setup.output_path, parquet_path, false, 1, 8192, "snappy")
         .await
         .expect("convert_to_parquet failed");
 
@@ -325,7 +325,7 @@ async fn tpcds_generate_and_convert_to_parquet() {
     let parquet_dir = TempDir::new().expect("failed to create parquet output dir");
     let parquet_path = parquet_dir.path().to_str().unwrap();
 
-    convert_to_parquet(&tpcds, &setup.output_path, parquet_path, false)
+    convert_to_parquet(&tpcds, &setup.output_path, parquet_path, false, 1, 8192, "snappy")
         .await
         .expect("convert_to_parquet failed");
 

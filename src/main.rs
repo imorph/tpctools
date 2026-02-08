@@ -96,6 +96,18 @@ struct ConvertOpt {
     /// Write fact tables as Hive-partitioned parquet (column=value/ subdirectories)
     #[structopt(long)]
     hive_partition: bool,
+
+    /// Number of parallel threads for conversion (0 = auto-detect based on available CPUs)
+    #[structopt(short = "j", long, default_value = "0")]
+    concurrency: usize,
+
+    /// Batch size for reading CSV files
+    #[structopt(long, default_value = "8192")]
+    batch_size: usize,
+
+    /// Compression codec for parquet output (snappy, zstd, none)
+    #[structopt(long, default_value = "snappy")]
+    compression: String,
 }
 
 #[derive(Debug, StructOpt)]
@@ -136,11 +148,21 @@ async fn main() -> Result<()> {
         }
         Opt::Convert(opt) => {
             let tpc = create_benchmark(&opt.benchmark);
+            let concurrency = if opt.concurrency == 0 {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+            } else {
+                opt.concurrency
+            };
             match convert_to_parquet(
                 tpc.as_ref(),
                 opt.input_path.as_path().to_str().unwrap(),
                 opt.output_path.as_path().to_str().unwrap(),
                 opt.hive_partition,
+                concurrency,
+                opt.batch_size,
+                &opt.compression,
             )
             .await
             {

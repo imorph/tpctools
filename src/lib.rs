@@ -13,6 +13,7 @@
 use std::fs;
 use std::io::Result;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -21,6 +22,8 @@ use datafusion::common::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::*;
+use futures::future::join_all;
+use tokio::sync::Semaphore;
 
 pub mod tpcds;
 pub mod tpch;
@@ -47,105 +50,234 @@ pub trait Tpc {
     }
 }
 
+/// Map a user-facing compression name to the string DataFusion expects.
+fn normalize_compression(name: &str) -> datafusion::error::Result<String> {
+    match name {
+        "none" => Ok("uncompressed".to_string()),
+        "snappy" => Ok("snappy".to_string()),
+        "zstd" => Ok("zstd(4)".to_string()),
+        "lz4" => Ok("lz4".to_string()),
+        "lz0" => Ok("lzo".to_string()),
+        other => Err(DataFusionError::NotImplemented(format!(
+            "Invalid compression format: {}",
+            other,
+        ))),
+    }
+}
+
 pub async fn convert_to_parquet(
     benchmark: &dyn Tpc,
     input_path: &str,
     output_path: &str,
     hive_partition: bool,
+    concurrency: usize,
+    batch_size: usize,
+    compression: &str,
 ) -> datafusion::error::Result<()> {
-    for table in benchmark.get_table_names() {
-        println!("Converting table {}", table);
-        let schema = benchmark.get_schema(table);
+    let concurrency = if concurrency == 0 {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    } else {
+        concurrency
+    };
 
-        // Append a placeholder field to absorb the trailing delimiter
-        // that TPC data generators add at the end of every line.
-        // TPC-H schemas already include a trailing "ignore" field, so skip those.
-        let has_trailing_ignore = schema
-            .fields
-            .last()
-            .is_some_and(|f| f.name() == "ignore");
-        let csv_schema = if has_trailing_ignore {
-            schema.clone()
-        } else {
-            let mut builder = SchemaBuilder::from(schema.fields);
-            builder.push(Field::new("__trailing_delimiter", DataType::Utf8, true));
-            builder.finish()
-        };
+    let table_ext = benchmark.get_table_ext().to_string();
+    let tables: Vec<(String, Schema, Option<String>)> = benchmark
+        .get_table_names()
+        .into_iter()
+        .map(|t| {
+            let schema = benchmark.get_schema(t);
+            let partition_col = benchmark.get_partition_col(t).map(|s| s.to_string());
+            (t.to_string(), schema, partition_col)
+        })
+        .collect();
 
-        let file_ext = format!(".{}", benchmark.get_table_ext());
-        let options = CsvReadOptions::new()
-            .schema(&csv_schema)
-            .delimiter(b'|')
-            .has_header(false)
-            .file_extension(&file_ext);
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let mut handles = Vec::new();
+    for (table, schema, partition_col) in tables {
+        let sem = semaphore.clone();
+        let inp = input_path.to_string();
+        let outp = output_path.to_string();
+        let comp = compression.to_string();
+        let ext = table_ext.clone();
 
-        let path = format!("{}/{}.{}", input_path, table, benchmark.get_table_ext());
-        let path = Path::new(&path);
-        if !path.exists() {
-            panic!("path does not exist: {:?}", path);
+        let handle = tokio::spawn(async move {
+            convert_single_table(
+                table,
+                schema,
+                partition_col,
+                inp,
+                outp,
+                hive_partition,
+                concurrency,
+                batch_size,
+                comp,
+                ext,
+                sem,
+            )
+            .await
+        });
+        handles.push(handle);
+    }
+
+    // Collect results
+    let results = join_all(handles).await;
+    for result in results {
+        match result {
+            Ok(inner) => inner?,
+            Err(e) => return Err(DataFusionError::Execution(format!("task failed: {}", e))),
         }
+    }
 
-        // create output dir
-        let output_dir_name = format!("{}/{}.parquet", output_path, table);
-        let output_dir = Path::new(&output_dir_name);
-        if output_dir.exists() {
-            panic!("output dir already exists: {}", output_dir.display());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn convert_single_table(
+    table: String,
+    schema: Schema,
+    partition_col: Option<String>,
+    input_path: String,
+    output_path: String,
+    hive_partition: bool,
+    concurrency: usize,
+    batch_size: usize,
+    compression: String,
+    table_ext: String,
+    semaphore: Arc<Semaphore>,
+) -> datafusion::error::Result<()> {
+    println!("Converting table {}", table);
+
+    // Append a placeholder field to absorb the trailing delimiter
+    // that TPC data generators add at the end of every line.
+    // TPC-H schemas already include a trailing "ignore" field, so skip those.
+    let has_trailing_ignore = schema
+        .fields
+        .last()
+        .is_some_and(|f| f.name() == "ignore");
+    let csv_schema = if has_trailing_ignore {
+        schema.clone()
+    } else {
+        let mut builder = SchemaBuilder::from(schema.fields);
+        builder.push(Field::new("__trailing_delimiter", DataType::Utf8, true));
+        builder.finish()
+    };
+
+    let file_ext = format!(".{}", table_ext);
+    let options = CsvReadOptions::new()
+        .schema(&csv_schema)
+        .delimiter(b'|')
+        .has_header(false)
+        .file_extension(&file_ext);
+
+    let path = format!("{}/{}.{}", input_path, table, table_ext);
+    let path = Path::new(&path);
+    if !path.exists() {
+        return Err(DataFusionError::Execution(format!(
+            "path does not exist: {:?}",
+            path
+        )));
+    }
+
+    // create output dir
+    let output_dir_name = format!("{}/{}.parquet", output_path, table);
+    let output_dir = Path::new(&output_dir_name);
+    if output_dir.exists() {
+        return Err(DataFusionError::Execution(format!(
+            "output dir already exists: {}",
+            output_dir.display()
+        )));
+    }
+
+    if hive_partition {
+        if let Some(partition_col) = partition_col {
+            let _permit = semaphore.acquire().await.unwrap();
+            println!(
+                "Writing hive-partitioned parquet for {} (partition by {})",
+                table, partition_col
+            );
+            let path_str = format!("{}", path.display());
+            let target_parts = std::cmp::min(4, concurrency);
+            let config = SessionConfig::new()
+                .with_batch_size(batch_size)
+                .with_target_partitions(target_parts);
+            let ctx = SessionContext::new_with_config(config);
+            let df = ctx.read_csv(&path_str, options.clone()).await?;
+
+            let trailing_col = if has_trailing_ignore {
+                "ignore"
+            } else {
+                "__trailing_delimiter"
+            };
+            let df = df.drop_columns(&[trailing_col])?;
+
+            let mut table_parquet_options = TableParquetOptions::default();
+            table_parquet_options.global.compression =
+                Some(normalize_compression(&compression)?);
+
+            let write_options = DataFrameWriteOptions::new()
+                .with_partition_by(vec![partition_col]);
+
+            df.write_parquet(
+                &output_dir_name,
+                write_options,
+                Some(table_parquet_options),
+            )
+            .await?;
+
+            return Ok(());
         }
+    }
 
-        if hive_partition {
-            if let Some(partition_col) = benchmark.get_partition_col(table) {
-                println!(
-                    "Writing hive-partitioned parquet for {} (partition by {})",
-                    table, partition_col
-                );
-                let path_str = format!("{}", path.display());
-                let config = SessionConfig::new().with_batch_size(8192);
-                let ctx = SessionContext::new_with_config(config);
-                let df = ctx.read_csv(&path_str, options.clone()).await?;
+    println!("Creating directory: {}", output_dir.display());
+    fs::create_dir(output_dir)?;
 
-                let trailing_col = if has_trailing_ignore {
-                    "ignore"
-                } else {
-                    "__trailing_delimiter"
-                };
-                let df = df.drop_columns(&[trailing_col])?;
-
-                let mut table_parquet_options = TableParquetOptions::default();
-                table_parquet_options.global.compression =
-                    Some("snappy".to_string());
-
-                let write_options = DataFrameWriteOptions::new()
-                    .with_partition_by(vec![partition_col.to_string()]);
-
-                df.write_parquet(
-                    &output_dir_name,
-                    write_options,
-                    Some(table_parquet_options),
-                )
-                .await?;
-
-                continue;
-            }
+    let x = PathBuf::from(path);
+    let mut file_vec = vec![];
+    if x.is_dir() {
+        let files = fs::read_dir(path)?;
+        for file in files {
+            let file = file?;
+            file_vec.push(file);
         }
+    }
 
-        println!("Creating directory: {}", output_dir.display());
-        fs::create_dir(output_dir)?;
+    let mut handles = Vec::new();
+    for (part, file) in file_vec.iter().enumerate() {
+        let dest_file = format!("{}/part-{}.parquet", output_dir.display(), part);
+        let sem = semaphore.clone();
+        let file_path = file.path();
+        let compression = compression.clone();
+        let csv_schema = csv_schema.clone();
+        let file_ext = file_ext.clone();
 
-        let x = PathBuf::from(path);
-        let mut file_vec = vec![];
-        if x.is_dir() {
-            let files = fs::read_dir(path)?;
-            for file in files {
-                let file = file?;
-                file_vec.push(file);
-            }
-        }
-
-        for (part, file) in file_vec.iter().enumerate() {
-            let dest_file = format!("{}/part-{}.parquet", output_dir.display(), part);
+        let handle = tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
             println!("Writing {}", dest_file);
-            let options = options.clone();
-            convert_tbl(&file.path(), &dest_file, &options, "parquet", "snappy", 8192).await?;
+            let options = CsvReadOptions::new()
+                .schema(&csv_schema)
+                .delimiter(b'|')
+                .has_header(false)
+                .file_extension(&file_ext);
+            convert_tbl(
+                &file_path,
+                &dest_file,
+                &options,
+                "parquet",
+                &compression,
+                batch_size,
+            )
+            .await
+        });
+        handles.push(handle);
+    }
+
+    let results = join_all(handles).await;
+    for result in results {
+        match result {
+            Ok(inner) => inner?,
+            Err(e) => return Err(DataFusionError::Execution(format!("task failed: {}", e))),
         }
     }
 
@@ -219,20 +351,8 @@ pub async fn convert_tbl(
                 .await?;
         }
         "parquet" => {
-            let compression_str = match compression {
-                "none" => "uncompressed",
-                "snappy" => "snappy",
-                "lz4" => "lz4",
-                "lz0" => "lzo",
-                other => {
-                    return Err(DataFusionError::NotImplemented(format!(
-                        "Invalid compression format: {}",
-                        other
-                    )))
-                }
-            };
             let mut table_parquet_options = TableParquetOptions::default();
-            table_parquet_options.global.compression = Some(compression_str.to_string());
+            table_parquet_options.global.compression = Some(normalize_compression(compression)?);
             df.write_parquet(
                 output_filename,
                 DataFrameWriteOptions::new(),
