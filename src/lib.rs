@@ -75,6 +75,7 @@ pub async fn convert_to_parquet(
     batch_size: usize,
     compression: &str,
 ) -> datafusion::error::Result<()> {
+    let start = Instant::now();
     let concurrency = if concurrency == 0 {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -95,9 +96,10 @@ pub async fn convert_to_parquet(
         })
         .collect();
 
+    let tables_count = tables.len();
     info!(
         "converting {} tables from '{}' to '{}'",
-        tables.len(),
+        tables_count,
         input_path,
         output_path
     );
@@ -139,6 +141,10 @@ pub async fn convert_to_parquet(
         }
     }
 
+    info!(
+        "conversion of all {} tables completed in {} ms",
+        tables_count, start.elapsed().as_millis()
+    );
     Ok(())
 }
 
@@ -202,6 +208,7 @@ async fn convert_single_table(
     if hive_partition {
         if let Some(partition_col) = partition_col {
             let _permit = semaphore.acquire().await.unwrap();
+            let start = Instant::now();
             info!(
                 "writing hive-partitioned parquet for '{}' (partition by {})",
                 table, partition_col
@@ -235,6 +242,10 @@ async fn convert_single_table(
             )
             .await?;
 
+            info!(
+                "conversion of '{}' (hive-partitioned) completed in {} ms",
+                table, start.elapsed().as_millis()
+            );
             return Ok(());
         }
     }
