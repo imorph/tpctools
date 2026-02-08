@@ -109,6 +109,10 @@ struct ConvertOpt {
     /// Compression codec for parquet output (snappy, zstd, none)
     #[structopt(long, default_value = "snappy")]
     compression: String,
+
+    /// Enable dictionary encoding for parquet columns (default: off for faster conversion)
+    #[structopt(long)]
+    dictionary: bool,
 }
 
 #[derive(Debug, StructOpt)]
@@ -176,8 +180,8 @@ async fn main() -> Result<()> {
                 opt.concurrency
             };
             debug!(
-                "convert settings: concurrency={}, batch_size={}, compression={}, hive_partition={}",
-                concurrency, opt.batch_size, opt.compression, opt.hive_partition
+                "convert settings: concurrency={}, batch_size={}, compression={}, hive_partition={}, dictionary={}",
+                concurrency, opt.batch_size, opt.compression, opt.hive_partition, opt.dictionary
             );
             match convert_to_parquet(
                 tpc.as_ref(),
@@ -187,6 +191,7 @@ async fn main() -> Result<()> {
                 concurrency,
                 opt.batch_size,
                 &opt.compression,
+                opt.dictionary,
             )
             .await
             {

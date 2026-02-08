@@ -66,6 +66,15 @@ fn normalize_compression(name: &str) -> datafusion::error::Result<String> {
     }
 }
 
+fn build_parquet_options(compression: &str, dictionary: bool) -> datafusion::error::Result<TableParquetOptions> {
+    let mut opts = TableParquetOptions::default();
+    opts.global.compression = Some(normalize_compression(compression)?);
+    opts.global.dictionary_enabled = Some(dictionary);
+    opts.global.write_batch_size = 8192;
+    Ok(opts)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn convert_to_parquet(
     benchmark: &dyn Tpc,
     input_path: &str,
@@ -74,6 +83,7 @@ pub async fn convert_to_parquet(
     concurrency: usize,
     batch_size: usize,
     compression: &str,
+    dictionary: bool,
 ) -> datafusion::error::Result<()> {
     let start = Instant::now();
     let concurrency = if concurrency == 0 {
@@ -126,6 +136,7 @@ pub async fn convert_to_parquet(
                 comp,
                 ext,
                 sem,
+                dictionary,
             )
             .await
         });
@@ -161,6 +172,7 @@ async fn convert_single_table(
     compression: String,
     table_ext: String,
     semaphore: Arc<Semaphore>,
+    dictionary: bool,
 ) -> datafusion::error::Result<()> {
     info!("converting table '{}'", table);
 
@@ -228,9 +240,7 @@ async fn convert_single_table(
             };
             let df = df.drop_columns(&[trailing_col])?;
 
-            let mut table_parquet_options = TableParquetOptions::default();
-            table_parquet_options.global.compression =
-                Some(normalize_compression(&compression)?);
+            let table_parquet_options = build_parquet_options(&compression, dictionary)?;
 
             let write_options = DataFrameWriteOptions::new()
                 .with_partition_by(vec![partition_col]);
@@ -289,6 +299,7 @@ async fn convert_single_table(
                 "parquet",
                 &compression,
                 batch_size,
+                dictionary,
             )
             .await
         });
@@ -351,6 +362,7 @@ pub async fn convert_tbl(
     file_format: &str,
     compression: &str,
     batch_size: usize,
+    dictionary: bool,
 ) -> datafusion::error::Result<()> {
     debug!(
         "converting '{}' to {}",
@@ -373,8 +385,7 @@ pub async fn convert_tbl(
                 .await?;
         }
         "parquet" => {
-            let mut table_parquet_options = TableParquetOptions::default();
-            table_parquet_options.global.compression = Some(normalize_compression(compression)?);
+            let table_parquet_options = build_parquet_options(compression, dictionary)?;
             df.write_parquet(
                 output_filename,
                 DataFrameWriteOptions::new(),
