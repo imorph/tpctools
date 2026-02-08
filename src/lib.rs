@@ -63,7 +63,7 @@ pub async fn convert_to_parquet(
         let has_trailing_ignore = schema
             .fields
             .last()
-            .map_or(false, |f| f.name() == "ignore");
+            .is_some_and(|f| f.name() == "ignore");
         let csv_schema = if has_trailing_ignore {
             schema.clone()
         } else {
