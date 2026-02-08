@@ -138,8 +138,20 @@ enum Command {
     Convert(ConvertOpt),
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let ncpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(ncpus)
+        .max_blocking_threads(ncpus * 2)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let opt = Opt::from_args();
     if std::env::var("RUST_LOG").is_err() {
         let level = if opt.verbose { "debug" } else { "info" };

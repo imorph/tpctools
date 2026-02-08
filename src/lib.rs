@@ -11,9 +11,10 @@
 // limitations under the License.
 
 use std::fs;
+use std::future::Future;
 use std::io::Result;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::pin::Pin;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -23,8 +24,7 @@ use datafusion::common::config::TableParquetOptions;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::*;
-use futures::future::join_all;
-use tokio::sync::Semaphore;
+use futures::stream::{self, StreamExt};
 
 pub mod tpcds;
 pub mod tpch;
@@ -114,217 +114,177 @@ pub async fn convert_to_parquet(
         output_path
     );
 
-    let semaphore = Arc::new(Semaphore::new(concurrency));
-    let mut handles = Vec::new();
+    // Shared context for non-hive single-file conversions (target_partitions=1)
+    let shared_config = SessionConfig::new()
+        .with_batch_size(batch_size)
+        .with_target_partitions(1);
+    let shared_ctx = SessionContext::new_with_config(shared_config);
+
+    // Prepare all work items upfront (validation + directory creation),
+    // then process them lazily with bounded concurrency via buffer_unordered.
+    type WorkFuture = Pin<Box<dyn Future<Output = datafusion::error::Result<()>> + Send>>;
+    let mut work: Vec<WorkFuture> = Vec::new();
+
     for (table, schema, partition_col) in tables {
-        let sem = semaphore.clone();
-        let inp = input_path.to_string();
-        let outp = output_path.to_string();
-        let comp = compression.to_string();
-        let ext = table_ext.clone();
+        let has_trailing_ignore = schema
+            .fields
+            .last()
+            .is_some_and(|f| f.name() == "ignore");
+        let csv_schema = if has_trailing_ignore {
+            schema.clone()
+        } else {
+            let mut builder = SchemaBuilder::from(schema.fields);
+            builder.push(Field::new("__trailing_delimiter", DataType::Utf8, true));
+            builder.finish()
+        };
 
-        let handle = tokio::spawn(async move {
-            convert_single_table(
-                table,
-                schema,
-                partition_col,
-                inp,
-                outp,
-                hive_partition,
-                concurrency,
-                batch_size,
-                comp,
-                ext,
-                sem,
-                dictionary,
-            )
-            .await
-        });
-        handles.push(handle);
-    }
+        let file_ext = format!(".{}", table_ext);
+        let path = format!("{}/{}.{}", input_path, table, table_ext);
+        if !Path::new(&path).exists() {
+            return Err(DataFusionError::Execution(format!(
+                "path does not exist: {:?}",
+                path
+            )));
+        }
 
-    // Collect results
-    let results = join_all(handles).await;
-    for result in results {
-        match result {
-            Ok(inner) => inner?,
-            Err(e) => return Err(DataFusionError::Execution(format!("task failed: {}", e))),
+        let output_dir_name = format!("{}/{}.parquet", output_path, table);
+        if Path::new(&output_dir_name).exists() {
+            return Err(DataFusionError::Execution(format!(
+                "output dir already exists: {}",
+                output_dir_name
+            )));
+        }
+
+        if hive_partition {
+            if let Some(partition_col) = partition_col {
+                let comp = compression.to_string();
+                let target_parts = std::cmp::min(4, concurrency);
+
+                work.push(Box::pin(async move {
+                    let start = Instant::now();
+                    info!(
+                        "writing hive-partitioned parquet for '{}' (partition by {})",
+                        table, partition_col
+                    );
+                    let config = SessionConfig::new()
+                        .with_batch_size(batch_size)
+                        .with_target_partitions(target_parts);
+                    let ctx = SessionContext::new_with_config(config);
+                    let options = CsvReadOptions::new()
+                        .schema(&csv_schema)
+                        .delimiter(b'|')
+                        .has_header(false)
+                        .file_extension(&file_ext);
+                    let df = ctx.read_csv(&path, options).await?;
+
+                    let trailing_col = if has_trailing_ignore {
+                        "ignore"
+                    } else {
+                        "__trailing_delimiter"
+                    };
+                    let df = df.drop_columns(&[trailing_col])?;
+                    let df = df.sort(vec![col(&partition_col).sort(true, true)])?;
+
+                    let table_parquet_options =
+                        build_parquet_options(&comp, batch_size, dictionary)?;
+                    let write_options =
+                        DataFrameWriteOptions::new().with_partition_by(vec![partition_col]);
+
+                    df.write_parquet(&output_dir_name, write_options, Some(table_parquet_options))
+                        .await?;
+
+                    info!(
+                        "conversion of '{}' (hive-partitioned) completed in {} ms",
+                        table,
+                        start.elapsed().as_millis()
+                    );
+                    Ok(())
+                }));
+                continue;
+            }
+        }
+
+        // Non-hive: create output dir, enumerate partition files
+        debug!("creating directory: {}", output_dir_name);
+        fs::create_dir(Path::new(&output_dir_name))?;
+
+        let dir_path = PathBuf::from(&path);
+        let mut file_vec = vec![];
+        if dir_path.is_dir() {
+            let files = fs::read_dir(&dir_path)?;
+            for file in files {
+                let file = file?;
+                file_vec.push(file);
+            }
+        }
+
+        debug!(
+            "found {} partition files for table '{}'",
+            file_vec.len(),
+            table
+        );
+
+        for (part, file) in file_vec.iter().enumerate() {
+            let dest_file = format!("{}/part-{}.parquet", output_dir_name, part);
+            let file_path = file.path();
+            let comp = compression.to_string();
+            let csv_schema = csv_schema.clone();
+            let file_ext = file_ext.clone();
+            let ctx = shared_ctx.clone();
+
+            work.push(Box::pin(async move {
+                debug!("writing {}", dest_file);
+                let options = CsvReadOptions::new()
+                    .schema(&csv_schema)
+                    .delimiter(b'|')
+                    .has_header(false)
+                    .file_extension(&file_ext);
+                let trailing_col = if csv_schema
+                    .fields
+                    .last()
+                    .is_some_and(|f| f.name() == "ignore")
+                {
+                    "ignore"
+                } else {
+                    "__trailing_delimiter"
+                };
+                convert_tbl(
+                    &ctx,
+                    &file_path,
+                    &dest_file,
+                    &options,
+                    "parquet",
+                    &comp,
+                    batch_size,
+                    dictionary,
+                    &[trailing_col],
+                )
+                .await
+            }));
         }
     }
 
     info!(
-        "conversion of all {} tables completed in {} ms",
-        tables_count, start.elapsed().as_millis()
+        "prepared {} work items, processing with concurrency={}",
+        work.len(),
+        concurrency
     );
-    Ok(())
-}
 
-#[allow(clippy::too_many_arguments)]
-async fn convert_single_table(
-    table: String,
-    schema: Schema,
-    partition_col: Option<String>,
-    input_path: String,
-    output_path: String,
-    hive_partition: bool,
-    concurrency: usize,
-    batch_size: usize,
-    compression: String,
-    table_ext: String,
-    semaphore: Arc<Semaphore>,
-    dictionary: bool,
-) -> datafusion::error::Result<()> {
-    info!("converting table '{}'", table);
+    // Process all work items with bounded concurrency (lazy — no semaphore needed)
+    let results: Vec<datafusion::error::Result<()>> = stream::iter(work)
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
 
-    // Append a placeholder field to absorb the trailing delimiter
-    // that TPC data generators add at the end of every line.
-    // TPC-H schemas already include a trailing "ignore" field, so skip those.
-    let has_trailing_ignore = schema
-        .fields
-        .last()
-        .is_some_and(|f| f.name() == "ignore");
-    let csv_schema = if has_trailing_ignore {
-        schema.clone()
-    } else {
-        let mut builder = SchemaBuilder::from(schema.fields);
-        builder.push(Field::new("__trailing_delimiter", DataType::Utf8, true));
-        builder.finish()
-    };
-
-    let file_ext = format!(".{}", table_ext);
-    let options = CsvReadOptions::new()
-        .schema(&csv_schema)
-        .delimiter(b'|')
-        .has_header(false)
-        .file_extension(&file_ext);
-
-    let path = format!("{}/{}.{}", input_path, table, table_ext);
-    let path = Path::new(&path);
-    if !path.exists() {
-        return Err(DataFusionError::Execution(format!(
-            "path does not exist: {:?}",
-            path
-        )));
-    }
-
-    // create output dir
-    let output_dir_name = format!("{}/{}.parquet", output_path, table);
-    let output_dir = Path::new(&output_dir_name);
-    if output_dir.exists() {
-        return Err(DataFusionError::Execution(format!(
-            "output dir already exists: {}",
-            output_dir.display()
-        )));
-    }
-
-    if hive_partition {
-        if let Some(partition_col) = partition_col {
-            let _permit = semaphore.acquire().await.unwrap();
-            let start = Instant::now();
-            info!(
-                "writing hive-partitioned parquet for '{}' (partition by {})",
-                table, partition_col
-            );
-            let path_str = format!("{}", path.display());
-            let target_parts = concurrency;
-            let config = SessionConfig::new()
-                .with_batch_size(batch_size)
-                .with_target_partitions(target_parts);
-            let ctx = SessionContext::new_with_config(config);
-            let df = ctx.read_csv(&path_str, options.clone()).await?;
-
-            let trailing_col = if has_trailing_ignore {
-                "ignore"
-            } else {
-                "__trailing_delimiter"
-            };
-            let df = df.drop_columns(&[trailing_col])?;
-            let df = df.sort(vec![col(&partition_col).sort(true, true)])?;
-
-            let table_parquet_options = build_parquet_options(&compression, batch_size, dictionary)?;
-
-            let write_options = DataFrameWriteOptions::new()
-                .with_partition_by(vec![partition_col]);
-
-            df.write_parquet(
-                &output_dir_name,
-                write_options,
-                Some(table_parquet_options),
-            )
-            .await?;
-
-            info!(
-                "conversion of '{}' (hive-partitioned) completed in {} ms",
-                table, start.elapsed().as_millis()
-            );
-            return Ok(());
-        }
-    }
-
-    debug!("creating directory: {}", output_dir.display());
-    fs::create_dir(output_dir)?;
-
-    let x = PathBuf::from(path);
-    let mut file_vec = vec![];
-    if x.is_dir() {
-        let files = fs::read_dir(path)?;
-        for file in files {
-            let file = file?;
-            file_vec.push(file);
-        }
-    }
-
-    debug!("found {} partition files for table '{}'", file_vec.len(), table);
-
-    let mut handles = Vec::new();
-    for (part, file) in file_vec.iter().enumerate() {
-        let dest_file = format!("{}/part-{}.parquet", output_dir.display(), part);
-        let sem = semaphore.clone();
-        let file_path = file.path();
-        let compression = compression.clone();
-        let csv_schema = csv_schema.clone();
-        let file_ext = file_ext.clone();
-
-        let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            debug!("writing {}", dest_file);
-            let options = CsvReadOptions::new()
-                .schema(&csv_schema)
-                .delimiter(b'|')
-                .has_header(false)
-                .file_extension(&file_ext);
-            let trailing_col = if csv_schema
-                .fields
-                .last()
-                .is_some_and(|f| f.name() == "ignore")
-            {
-                "ignore"
-            } else {
-                "__trailing_delimiter"
-            };
-            convert_tbl(
-                &file_path,
-                &dest_file,
-                &options,
-                "parquet",
-                &compression,
-                batch_size,
-                dictionary,
-                &[trailing_col],
-            )
-            .await
-        });
-        handles.push(handle);
-    }
-
-    let results = join_all(handles).await;
     for result in results {
-        match result {
-            Ok(inner) => inner?,
-            Err(e) => return Err(DataFusionError::Execution(format!("task failed: {}", e))),
-        }
+        result?;
     }
 
+    info!(
+        "conversion of all {} tables completed in {} ms",
+        tables_count,
+        start.elapsed().as_millis()
+    );
     Ok(())
 }
 
@@ -367,6 +327,7 @@ fn is_same_device(path1: &Path, path2: &Path) -> std::result::Result<bool, std::
 }
 
 pub async fn convert_tbl(
+    ctx: &SessionContext,
     input_path: &Path,
     output_filename: &str,
     options: &CsvReadOptions<'_>,
@@ -383,9 +344,6 @@ pub async fn convert_tbl(
     );
 
     let start = Instant::now();
-
-    let config = SessionConfig::new().with_batch_size(batch_size);
-    let ctx = SessionContext::new_with_config(config);
 
     // build plan to read the TBL file
     let csv_filename = format!("{}", input_path.display());
