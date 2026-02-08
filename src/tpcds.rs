@@ -643,3 +643,219 @@ impl Tpc for TpcDs {
 fn make_decimal_type(p: u8, s: i8) -> DataType {
     DataType::Decimal128(p, s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Tpc;
+
+    fn tpcds() -> TpcDs {
+        TpcDs::new()
+    }
+
+    #[test]
+    fn table_names_returns_24_tables() {
+        let t = tpcds();
+        let names = t.get_table_names();
+        assert_eq!(names.len(), 24);
+        assert!(names.contains(&"store_sales"));
+        assert!(names.contains(&"catalog_sales"));
+        assert!(names.contains(&"web_sales"));
+        assert!(names.contains(&"customer"));
+        assert!(names.contains(&"date_dim"));
+        assert!(names.contains(&"item"));
+    }
+
+    #[test]
+    fn table_ext_is_dat() {
+        assert_eq!(tpcds().get_table_ext(), "dat");
+    }
+
+    #[test]
+    fn field_counts() {
+        let t = tpcds();
+        let expected = vec![
+            ("customer_address", 13),
+            ("customer_demographics", 9),
+            ("date_dim", 28),
+            ("warehouse", 14),
+            ("ship_mode", 6),
+            ("time_dim", 10),
+            ("reason", 3),
+            ("income_band", 3),
+            ("item", 22),
+            ("store", 29),
+            ("call_center", 31),
+            ("customer", 18),
+            ("web_site", 26),
+            ("store_returns", 20),
+            ("household_demographics", 5),
+            ("web_page", 14),
+            ("promotion", 19),
+            ("catalog_page", 9),
+            ("inventory", 4),
+            ("catalog_returns", 27),
+            ("web_returns", 24),
+            ("web_sales", 34),
+            ("catalog_sales", 34),
+            ("store_sales", 23),
+        ];
+        for (table, count) in expected {
+            assert_eq!(
+                t.get_schema(table).fields().len(),
+                count,
+                "field count mismatch for {}",
+                table
+            );
+        }
+    }
+
+    #[test]
+    fn schemas_do_not_have_trailing_ignore_field() {
+        let t = tpcds();
+        for table in t.get_table_names() {
+            let schema = t.get_schema(table);
+            let last = schema.fields().last().unwrap();
+            assert_ne!(
+                last.name(),
+                "ignore",
+                "table {} should not have trailing ignore field",
+                table
+            );
+        }
+    }
+
+    #[test]
+    fn primary_key_fields_are_non_nullable_int32() {
+        let t = tpcds();
+        let cases = vec![
+            ("customer_address", "ca_address_sk"),
+            ("customer_demographics", "cd_demo_sk"),
+            ("date_dim", "d_date_sk"),
+            ("warehouse", "w_warehouse_sk"),
+            ("ship_mode", "sm_ship_mode_sk"),
+            ("time_dim", "t_time_sk"),
+            ("reason", "r_reason_sk"),
+            ("income_band", "ib_income_band_sk"),
+            ("item", "i_item_sk"),
+            ("store", "s_store_sk"),
+            ("call_center", "cc_call_center_sk"),
+            ("customer", "c_customer_sk"),
+            ("web_site", "web_site_sk"),
+            ("household_demographics", "hd_demo_sk"),
+            ("web_page", "wp_web_page_sk"),
+            ("promotion", "p_promo_sk"),
+            ("catalog_page", "cp_catalog_page_sk"),
+        ];
+        for (table, pk) in cases {
+            let schema = t.get_schema(table);
+            let field = schema.field_with_name(pk).unwrap();
+            assert!(!field.is_nullable(), "{}.{} should be non-nullable", table, pk);
+            assert_eq!(*field.data_type(), DataType::Int32, "{}.{} should be Int32", table, pk);
+        }
+    }
+
+    #[test]
+    fn decimal_precision_5_2_for_offsets() {
+        let t = tpcds();
+        let schema = t.get_schema("customer_address");
+        let field = schema.field_with_name("ca_gmt_offset").unwrap();
+        assert_eq!(*field.data_type(), DataType::Decimal128(5, 2));
+    }
+
+    #[test]
+    fn decimal_precision_7_2_for_monetary() {
+        let t = tpcds();
+        let schema = t.get_schema("store_sales");
+        let field = schema.field_with_name("ss_wholesale_cost").unwrap();
+        assert_eq!(*field.data_type(), DataType::Decimal128(7, 2));
+    }
+
+    #[test]
+    fn decimal_precision_15_2_for_promotion_cost() {
+        let t = tpcds();
+        let schema = t.get_schema("promotion");
+        let field = schema.field_with_name("p_cost").unwrap();
+        assert_eq!(*field.data_type(), DataType::Decimal128(15, 2));
+    }
+
+    #[test]
+    fn date32_fields() {
+        let t = tpcds();
+        let schema = t.get_schema("date_dim");
+        let field = schema.field_with_name("d_date").unwrap();
+        assert_eq!(*field.data_type(), DataType::Date32);
+
+        let schema = t.get_schema("item");
+        let field = schema.field_with_name("i_rec_start_date").unwrap();
+        assert_eq!(*field.data_type(), DataType::Date32);
+    }
+
+    #[test]
+    fn make_decimal_type_helper() {
+        assert_eq!(make_decimal_type(5, 2), DataType::Decimal128(5, 2));
+        assert_eq!(make_decimal_type(7, 2), DataType::Decimal128(7, 2));
+        assert_eq!(make_decimal_type(15, 2), DataType::Decimal128(15, 2));
+    }
+
+    #[test]
+    fn all_tables_have_non_empty_schemas() {
+        let t = tpcds();
+        for table in t.get_table_names() {
+            let schema = t.get_schema(table);
+            assert!(
+                !schema.fields().is_empty(),
+                "table {} has empty schema",
+                table
+            );
+        }
+    }
+
+    #[test]
+    fn first_field_name_prefix() {
+        let t = tpcds();
+        let cases = vec![
+            ("customer_address", "ca_"),
+            ("customer_demographics", "cd_"),
+            ("date_dim", "d_"),
+            ("warehouse", "w_"),
+            ("ship_mode", "sm_"),
+            ("time_dim", "t_"),
+            ("reason", "r_"),
+            ("income_band", "ib_"),
+            ("item", "i_"),
+            ("store", "s_"),
+            ("call_center", "cc_"),
+            ("customer", "c_"),
+            ("store_sales", "ss_"),
+            ("store_returns", "sr_"),
+            ("catalog_sales", "cs_"),
+            ("catalog_returns", "cr_"),
+            ("web_sales", "ws_"),
+            ("web_returns", "wr_"),
+            ("web_page", "wp_"),
+            ("web_site", "web_"),
+            ("catalog_page", "cp_"),
+            ("household_demographics", "hd_"),
+            ("promotion", "p_"),
+            ("inventory", "inv_"),
+        ];
+        for (table, prefix) in cases {
+            let schema = t.get_schema(table);
+            let first = schema.fields().first().unwrap();
+            assert!(
+                first.name().starts_with(prefix),
+                "table {} first field {} doesn't start with {}",
+                table,
+                first.name(),
+                prefix
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn invalid_table_name_panics() {
+        tpcds().get_schema("nonexistent");
+    }
+}

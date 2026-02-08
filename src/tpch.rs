@@ -105,12 +105,6 @@ impl Tpc for TpcH {
                 fs::create_dir(&output_dir)?;
             }
 
-            let filename = format!("{}/{}.tbl", generator_path, table);
-            let filename2 = format!("{}/part-0.dat", output_dir);
-            if Path::new(&filename).exists() {
-                move_or_copy(&Path::new(&filename), &Path::new(&filename2))?;
-            }
-
             if partitions == 1 {
                 let filename = format!("{}/{}.tbl", generator_path, table);
                 let filename2 = format!("{}/part-0.tbl", output_dir);
@@ -242,5 +236,144 @@ impl Tpc for TpcH {
 
     fn get_table_ext(&self) -> &str {
         "tbl"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Tpc;
+
+    fn tpch() -> TpcH {
+        TpcH::new()
+    }
+
+    #[test]
+    fn table_names_returns_8_tables() {
+        let t = tpch();
+        let names = t.get_table_names();
+        assert_eq!(names.len(), 8);
+        assert!(names.contains(&"nation"));
+        assert!(names.contains(&"region"));
+        assert!(names.contains(&"part"));
+        assert!(names.contains(&"supplier"));
+        assert!(names.contains(&"partsupp"));
+        assert!(names.contains(&"customer"));
+        assert!(names.contains(&"orders"));
+        assert!(names.contains(&"lineitem"));
+    }
+
+    #[test]
+    fn table_ext_is_tbl() {
+        assert_eq!(tpch().get_table_ext(), "tbl");
+    }
+
+    #[test]
+    fn field_counts() {
+        let t = tpch();
+        let expected = vec![
+            ("nation", 5),
+            ("region", 4),
+            ("part", 10),
+            ("supplier", 8),
+            ("partsupp", 6),
+            ("customer", 9),
+            ("orders", 10),
+            ("lineitem", 17),
+        ];
+        for (table, count) in expected {
+            assert_eq!(
+                t.get_schema(table).fields().len(),
+                count,
+                "field count mismatch for {}",
+                table
+            );
+        }
+    }
+
+    #[test]
+    fn all_schemas_have_trailing_ignore_field() {
+        let t = tpch();
+        for table in t.get_table_names() {
+            let schema = t.get_schema(table);
+            let last = schema.fields().last().unwrap();
+            assert_eq!(last.name(), "ignore", "table {} missing trailing ignore", table);
+            assert_eq!(*last.data_type(), DataType::Utf8);
+            assert!(last.is_nullable());
+        }
+    }
+
+    #[test]
+    fn primary_key_fields_are_non_nullable_int64() {
+        let t = tpch();
+        let cases = vec![
+            ("nation", "n_nationkey"),
+            ("region", "r_regionkey"),
+            ("part", "p_partkey"),
+            ("supplier", "s_suppkey"),
+            ("customer", "c_custkey"),
+            ("orders", "o_orderkey"),
+            ("lineitem", "l_orderkey"),
+        ];
+        for (table, pk) in cases {
+            let schema = t.get_schema(table);
+            let field = schema.field_with_name(pk).unwrap();
+            assert!(!field.is_nullable(), "{}.{} should be non-nullable", table, pk);
+            assert_eq!(*field.data_type(), DataType::Int64, "{}.{} should be Int64", table, pk);
+        }
+    }
+
+    #[test]
+    fn decimal_fields_use_decimal128_11_2() {
+        let t = tpch();
+        let schema = t.get_schema("lineitem");
+        let field = schema.field_with_name("l_extendedprice").unwrap();
+        assert_eq!(*field.data_type(), DataType::Decimal128(11, 2));
+    }
+
+    #[test]
+    fn date_fields_use_date32() {
+        let t = tpch();
+        let schema = t.get_schema("orders");
+        let field = schema.field_with_name("o_orderdate").unwrap();
+        assert_eq!(*field.data_type(), DataType::Date32);
+
+        let schema = t.get_schema("lineitem");
+        for name in &["l_shipdate", "l_commitdate", "l_receiptdate"] {
+            let field = schema.field_with_name(name).unwrap();
+            assert_eq!(*field.data_type(), DataType::Date32, "{} should be Date32", name);
+        }
+    }
+
+    #[test]
+    fn first_field_name_prefix() {
+        let t = tpch();
+        let expected = vec![
+            ("nation", "n_"),
+            ("region", "r_"),
+            ("part", "p_"),
+            ("supplier", "s_"),
+            ("partsupp", "ps_"),
+            ("customer", "c_"),
+            ("orders", "o_"),
+            ("lineitem", "l_"),
+        ];
+        for (table, prefix) in expected {
+            let schema = t.get_schema(table);
+            let first = schema.fields().first().unwrap();
+            assert!(
+                first.name().starts_with(prefix),
+                "table {} first field {} doesn't start with {}",
+                table,
+                first.name(),
+                prefix
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn invalid_table_name_panics() {
+        tpch().get_schema("nonexistent");
     }
 }

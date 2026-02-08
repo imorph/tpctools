@@ -117,3 +117,48 @@ fn create_benchmark(name: &str) -> Box<dyn Tpc> {
         _ => panic!("invalid benchmark name"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_benchmark_tpch() {
+        let b = create_benchmark("tpch");
+        assert_eq!(b.get_table_ext(), "tbl");
+        assert_eq!(b.get_table_names().len(), 8);
+    }
+
+    #[test]
+    fn create_benchmark_tpc_h_alias() {
+        let b = create_benchmark("tpc-h");
+        assert_eq!(b.get_table_ext(), "tbl");
+        assert_eq!(b.get_table_names().len(), 8);
+    }
+
+    #[test]
+    fn create_benchmark_tpcds() {
+        let b = create_benchmark("tpcds");
+        assert_eq!(b.get_table_ext(), "dat");
+        assert_eq!(b.get_table_names().len(), 24);
+    }
+
+    #[test]
+    fn create_benchmark_tpc_ds_alias() {
+        let b = create_benchmark("tpc-ds");
+        assert_eq!(b.get_table_ext(), "dat");
+        assert_eq!(b.get_table_names().len(), 24);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid benchmark name")]
+    fn create_benchmark_invalid_name_panics() {
+        create_benchmark("invalid");
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid benchmark name")]
+    fn create_benchmark_empty_string_panics() {
+        create_benchmark("");
+    }
+}

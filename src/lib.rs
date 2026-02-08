@@ -55,6 +55,7 @@ pub async fn convert_to_parquet(
         let options = CsvReadOptions::new()
             .schema(&schema)
             .delimiter(b'|')
+            .has_header(false)
             .file_extension(&file_ext);
 
         let path = format!("{}/{}.{}", input_path, table, benchmark.get_table_ext());
@@ -84,35 +85,11 @@ pub async fn convert_to_parquet(
 
         let mut part = 0;
         for file in &file_vec {
-            let stub = file.file_name().to_str().unwrap().to_owned();
-            let stub = &stub[0..stub.len() - 4]; // remove .dat or .tbl
-                                                 // write to temp dir that will contain nested dirs
-                                                 // example: /tmp/nation-temp.parquet/part-1.parquet/part-0.parquet
-            let output_parts_dir = format!("{}/{}-temp.parquet", output_dir.display(), stub);
-            println!("Writing {}", output_parts_dir);
+            let dest_file = format!("{}/part-{}.parquet", output_dir.display(), part);
+            println!("Writing {}", dest_file);
             let options = options.clone();
-            // async move {
-            convert_tbl(
-                &file.path(),
-                &output_parts_dir,
-                &options,
-                "parquet",
-                "snappy",
-                8192,
-            )
-            .await?;
-            // }
-
-            let paths = fs::read_dir(&output_parts_dir)?;
-            for path in paths {
-                let path = path?;
-                let dest_file = format!("{}/part-{}.parquet", output_dir.display(), part);
-                part += 1;
-                let dest_path = Path::new(&dest_file);
-                move_or_copy(&path.path(), &dest_path)?;
-            }
-            println!("Removing {}", output_parts_dir);
-            fs::remove_dir_all(Path::new(&output_parts_dir))?;
+            convert_tbl(&file.path(), &dest_file, &options, "parquet", "snappy", 8192).await?;
+            part += 1;
         }
     }
 
@@ -217,4 +194,83 @@ pub async fn convert_tbl(
     println!("Conversion completed in {} ms", start.elapsed().as_millis());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn move_or_copy_same_device() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("source.txt");
+        let dest = dir.path().join("dest.txt");
+        fs::write(&src, b"hello").unwrap();
+
+        move_or_copy(&src, &dest).unwrap();
+
+        assert!(!src.exists());
+        assert!(dest.exists());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "hello");
+    }
+
+    #[test]
+    fn move_or_copy_into_subdirectory() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+
+        let src = dir.path().join("file.txt");
+        let dest = sub.join("file.txt");
+        fs::write(&src, b"data").unwrap();
+
+        move_or_copy(&src, &dest).unwrap();
+
+        assert!(!src.exists());
+        assert!(dest.exists());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "data");
+    }
+
+    #[test]
+    fn move_or_copy_large_file_preserves_data() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("large.bin");
+        let dest = dir.path().join("large_dest.bin");
+
+        let data: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
+        {
+            let mut f = fs::File::create(&src).unwrap();
+            f.write_all(&data).unwrap();
+        }
+
+        move_or_copy(&src, &dest).unwrap();
+
+        assert!(!src.exists());
+        let read_back = fs::read(&dest).unwrap();
+        assert_eq!(read_back.len(), 1_000_000);
+        assert_eq!(read_back, data);
+    }
+
+    #[test]
+    fn move_or_copy_nonexistent_source_returns_err() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("does_not_exist.txt");
+        let dest = dir.path().join("dest.txt");
+
+        let result = move_or_copy(&src, &dest);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_same_device_same_directory() {
+        let dir = TempDir::new().unwrap();
+        let file1 = dir.path().join("a.txt");
+        let file2 = dir.path().join("b.txt");
+        fs::write(&file1, b"a").unwrap();
+
+        let result = is_same_device(&file1, &file2).unwrap();
+        assert!(result);
+    }
 }
